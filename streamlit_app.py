@@ -6,31 +6,30 @@ from datetime import datetime
 from sklearn.linear_model import LinearRegression
 import time
 
-st.set_page_config(page_title="币安永续合约上升通道扫描", page_icon="📈")
+st.set_page_config(page_title="OKX永续合约上升通道扫描", page_icon="📈")
 
-st.title("📈 币安永续合约上升通道扫描")
-st.markdown("实时扫描574个币安U本位永续合约，找出上升通道模型")
+st.title("📈 OKX永续合约上升通道扫描")
+st.markdown("实时扫描OKX U本位永续合约，找出上升通道模型")
 
 @st.cache_data(ttl=300)
 def get_perpetual_symbols():
-    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+    url = "https://www.okx.com/api/v5/public/instruments"
+    params = {"instType": "SWAP", "uly": "USDT"}
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(3):
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, params=params, headers=headers, timeout=15)
             data = response.json()
-            if 'symbols' in data:
+            if data.get('code') == '0':
                 symbols = []
-                for s in data['symbols']:
-                    if s.get('contractType') == 'PERPETUAL' and s.get('status') == 'TRADING':
+                for s in data['data']:
+                    if s.get('instId', '').endswith('-USDT-SWAP'):
                         symbols.append({
-                            'symbol': s['symbol'],
-                            'baseAsset': s['baseAsset'],
-                            'onboardDate': s.get('onboardDate', '20200101')
+                            'symbol': s['instId'],
+                            'baseAsset': s['baseCcy'],
+                            'onboardDate': s.get('listTime', '20200101')[:8]
                         })
                 return symbols
-            elif 'code' in data:
-                st.error(f"币安API错误: {data.get('msg', 'Unknown error')}")
         except Exception as e:
             if attempt < 2:
                 time.sleep(2)
@@ -38,17 +37,19 @@ def get_perpetual_symbols():
             st.error(f"获取合约列表失败: {str(e)}")
     return []
 
-def get_klines(symbol, limit=100):
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=5m&limit={limit}"
+def get_klines(instId, limit=100):
+    url = f"https://www.okx.com/api/v5/market/candles"
+    params = {"instId": instId, "bar": "5m", "limit": str(limit)}
     headers = {"User-Agent": "Mozilla/5.0"}
     for attempt in range(2):
         try:
-            response = requests.get(url, headers=headers, timeout=8)
+            response = requests.get(url, params=params, headers=headers, timeout=8)
             data = response.json()
-            if isinstance(data, list) and len(data) > 10:
-                closes = [float(c[4]) for c in data]
-                highs = [float(c[2]) for c in data]
-                lows = [float(c[3]) for c in data]
+            if data.get('code') == '0' and data['data']:
+                klines = data['data'][:limit]
+                closes = [float(c[4]) for c in klines]
+                highs = [float(c[2]) for c in klines]
+                lows = [float(c[3]) for c in klines]
                 return closes, highs, lows
         except:
             if attempt < 1:
@@ -90,12 +91,15 @@ def check_uptrend(closes, highs, lows):
         pass
     return None
 
-def get_price(symbol):
-    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
+def get_price(instId):
+    url = "https://www.okx.com/api/v5/market/ticker"
+    params = {"instId": instId}
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, headers=headers, timeout=3)
-        return float(r.json()['price'])
+        r = requests.get(url, params=params, headers=headers, timeout=3)
+        data = r.json()
+        if data.get('code') == '0':
+            return float(data['data'][0]['last'])
     except:
         return None
 
@@ -105,10 +109,10 @@ st.session_state.last_update = None
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("🔄 立即扫描", type="primary", use_container_width=True):
-        with st.spinner("正在扫描币安合约..."):
+        with st.spinner("正在扫描OKX合约..."):
             symbols = get_perpetual_symbols()
             if not symbols:
-                st.error("无法获取币安合约列表，请稍后重试")
+                st.error("无法获取OKX合约列表，请稍后重试")
                 st.stop()
             
             results = []
@@ -116,16 +120,17 @@ with col1:
             status_text = st.empty()
             
             for i, s in enumerate(symbols):
-                status_text.text(f"正在分析 {s['symbol']} ({i+1}/{len(symbols)})")
+                if i % 10 == 0:
+                    status_text.text(f"正在分析 {s['symbol']} ({i+1}/{len(symbols)})")
                 result = check_uptrend(*get_klines(s['symbol']))
                 if result:
-                    result['symbol'] = s['symbol'].replace('USDT', '')
+                    result['symbol'] = s['symbol'].replace('-USDT-SWAP', '')
                     result['onboardDate'] = s['onboardDate']
                     result['price'] = get_price(s['symbol'])
                     results.append(result)
                 progress_bar.progress((i + 1) / len(symbols))
-                if i % 50 == 0:
-                    time.sleep(0.5)
+                if i % 20 == 0:
+                    time.sleep(0.3)
             
             results.sort(key=lambda x: x['onboardDate'], reverse=True)
             st.session_state.results = results
@@ -141,7 +146,7 @@ with col3:
 if st.session_state.results:
     st.subheader("🏆 上升通道列表（按上架时间排序）")
     
-    for _, row in st.session_state.results.items():
+    for row in st.session_state.results:
         date_str = row.get('onboardDate', '20200101')
         try:
             date_obj = datetime.strptime(date_str, '%Y%m%d')
@@ -158,6 +163,6 @@ if st.session_state.results:
             st.markdown(f"## {row['position']}")
         st.markdown("---")
 else:
-    st.info("👆 点击上方「立即扫描」开始实时扫描币安永续合约")
+    st.info("👆 点击上方「立即扫描」开始实时扫描OKX永续合约")
 
-st.caption("📊 数据来源：币安API | 每5分钟K线 | 上升通道判定：线性回归 R²>0.5")
+st.caption("📊 数据来源：OKX API | 每5分钟K线 | 上升通道判定：线性回归 R²>0.5")
